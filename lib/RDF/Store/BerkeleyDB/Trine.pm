@@ -6,7 +6,7 @@ use warnings;
 
 =head1 NAME
 
-RDF::Store::BerkeleyDB::Trine - The great new RDF::Store::BerkeleyDB::Trine!
+RDF::Store::BerkeleyDB::Trine - Storage driver for RDF::Trine
 
 =head1 VERSION
 
@@ -26,14 +26,8 @@ Perhaps a little code snippet.
     use RDF::Store::BerkeleyDB::Trine;
 
     my $foo = RDF::Store::BerkeleyDB::Trine->new();
-    ...
 
-=head1 EXPORT
-
-A list of functions that can be exported.  You can delete this section
-if you don't export anything, such as for a purely object-oriented module.
-
-=head1 SUBROUTINES/METHODS
+=head1 METHODS
 
 =head2 function1
 

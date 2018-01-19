@@ -1,4 +1,4 @@
-MANIFEST
+syntax: glob
 MANIFEST.bak
 Makefile
 Makefile.old

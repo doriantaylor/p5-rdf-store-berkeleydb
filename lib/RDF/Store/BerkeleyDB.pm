@@ -4,7 +4,7 @@ use 5.014;
 use strict;
 use warnings FATAL => 'all';
 
-use Moo::Role;
+use Moo;
 
 use Digest;
 use URI;
@@ -50,7 +50,7 @@ sub _is_really {
     my ($thing, $class) = @_;
 
     my $ref = ref $thing or return;
-    return $thing->isa($class) || reftype $thing eq $class
+    return $thing->isa($class) || Scalar::Util::reftype($thing) eq $class
         if Scalar::Util::blessed($thing);
 
     return $ref eq $class;
@@ -75,9 +75,129 @@ sub _create_dir {
         };
     }
 
-    # this should always be true since it's a reference
+    # not like we're evaluating the output but whatever
     $dir;
 }
+
+# is URI, IRI, or conforming opaque string (strict means no bnodes)
+sub _assert_resource {
+    my ($obj, $strict) = @_;
+}
+
+# is URI::BNode or conforming opaque string starting with "_:"
+sub _assert_blank {
+}
+
+# either a UTF-8 string or an ARRAY reference
+sub _assert_literal {
+}
+
+sub _encode_resource {
+}
+
+sub _decode_resource {
+}
+
+sub _encode_literal {
+    my $literal = shift;
+}
+
+sub _decode_literal {
+    # will decode into either a string or arrayref
+}
+
+# databases:
+
+# node: resolves nodes to their values
+#   key:   sha256 hash of normalized+encoded node
+#   value: normalized+encoded node
+#
+# statement: stores statement data
+#   key:   sha256 hash of normalized+encoded statement
+#   value: concatenated sha256 hashes of SPO nodes
+#
+# context: maps statement to graph
+#   key:   concatenated sha256 hashes of graph and normalized+encoded statement
+#   value: sha256 hash of normalized+encoded node
+#
+# literal: enables lookups on literal (sans language/datatype)
+#   key:   raw literal value
+#   value: sha256 hash of normalized+encoded literal
+#
+# language: enables lookups on language codes
+#   key:   language code
+#   value: sha256 hash of normalized+encoded literal
+#
+# datatype: enables lookups on datatypes
+#   key:   sha256 hash of normalized+encoded datatype
+#   value: sha256 hash of normalized+encoded literal
+#
+# graph: resolves graph node to statements
+#   key:   sha256 hash of normalized+encoded node
+#   value: sha256 hash of normalized+encoded statement
+#
+# subject: resolves subject node to statements
+#   key:   sha256 hash of normalized+encoded node
+#   value: sha256 hash of normalized+encoded statement
+#
+# predicate: resolves predicate node to statements
+#   key:   sha256 hash of normalized+encoded node
+#   value: sha256 hash of normalized+encoded statement
+#
+# object: resolves object node to statements
+#   key:   sha256 hash of normalized+encoded node
+#   value: sha256 hash of normalized+encoded statement
+
+# database constants
+my @DBS  = qw(node statement context literal language datatype
+              graph subject predicate object);
+my %DUPS = map +($_ => 1), @DBS[3..$#DBS]; # DBs with duplicates
+
+# secondary database function generators
+sub _offset {
+    my ($off, $len) = @_;
+    sub {
+        $_[2] = substr($_[1], $off, $len);
+        return 0;
+    };
+}
+
+sub _lit {
+    my $which = shift;
+    Throwable::Error->throw("$which is not an integer between 0 and 2")
+          unless $which =~ /^[0-2]$/;
+
+    sub {
+        return DB_DONOTINDEX unless $_[1] =~ /^"/;
+        my $aref = _decode_literal($_[1]);
+
+        # coerce to array of the form [ content, language, datatype ]
+        my @a = ref $aref eq 'ARRAY' ? @$aref : ($aref, undef, undef);
+
+        # datatype will be a URI reference. since datatypes and
+        # language tags are disjoint, it can occupy the second position.
+        splice @a, 1, 0, undef if @a == 2 and ref $a[1];
+
+        # if we still have a 2-piece array, the second will be language.
+        push @a, undef if @a == 2;
+
+        if (defined (my $k = $a[$which])) {
+            $_[2] = $which ? "$k" : lc $k;
+            return 0;
+        }
+        DB_DONOTINDEX;
+    };
+}
+
+my %ASSOC = (
+    graph     => _offset(0,  32),
+    subject   => _offset(0,  32),
+    predicate => _offset(32, 32),
+    object    => _offset(64, 32),
+    literal   => _lit(0),
+    language  => _lit(1),
+    datatype  => _lit(2),
+);
 
 has dir => (
     is       => 'ro',
@@ -108,37 +228,6 @@ has _contents => (
     is       => 'ro',
     init_arg => undef,
     default  => sub { {} },
-);
-
-my @DBS  = qw(statement node language datatype graph subject predicate object);
-my %DUPS = map +($_ => 1), @DBS[2..$#DBS]; # DBs with duplicates
-
-# secondary database functions
-sub _offset {
-    my ($off, $len) = @_;
-    sub {
-        $_[2] = substr($_[1], $off, $len);
-        return 0;
-    };
-}
-sub _lit {
-    my $which = int not not shift;
-    sub {
-        return DB_DONOTINDEX unless $_[1] =~ /^"/;
-        my $aref = _decode_literal($_[1]);
-        if (ref $aref eq 'ARRAY' and defined (my $k = $aref->[1 + $which])) {
-            $_[2] = $which ? "$k" : lc $k;
-            return 0;
-        }
-        DB_DONOTINDEX;
-    };
-}
-my %ASSOC = (
-    subject   => _offset(0,  32),
-    predicate => _offset(32, 32),
-    object    => _offset(64, 32),
-    language  => _lit(0),
-    datatype  => _lit(1),
 );
 
 sub BUILD {
@@ -180,56 +269,78 @@ sub BUILD {
     # subject, predicate, object are secondary to statement
     for my $id (qw(subject predicate object)) {
         $contents->{statement}->associate($contents->{$id}, $ASSOC{$id}) == 0
-            or Throwable::Error->throw
-                ("Error associating $id to statement database");
+            or Throwable::Error->throw("Error associating $id to statement "
+                                           . "database: $BerkeleyDB::Error");
     }
-    # graph, subject, predicate, object all foreign key to node
-    for my $id (qw(graph subject predicate object)) {
-        $contents->{$id}->associate_foreign
-            ($contents->{node}, undef, DB_FOREIGN_ABORT) == 0
-                or Throwable::Error->throw
-                    ("Error associating $id to node database");
+
+    # we need a special association for context to graph
+    if ($contents->{context}->associate
+            ($contents->{graph}, $ASSOC{graph}) != 0) {
+        Throwable::Error->throw('Error associating graph to context '
+                                    . "database: $BerkeleyDB::Error");
     }
 
     # language, datatype are secondary to node
-    for my $id (qw(language datatype)) {
+    for my $id (qw(literal language datatype)) {
         $contents->{node}->associate($contents->{$id}, $ASSOC{$id}) == 0
-            or Throwable::Error->throw
-                ("Error associating $id to node database");
+            or Throwable::Error->throw("Error associating $id to node " .
+                                           "database: $BerkeleyDB::Error");
     }
+
+    # subject, predicate, object all foreign key to node
+    # XXX cannot make graph a foreign key as graph cannot be empty
+    for my $id (qw(datatype graph subject predicate object)) {
+        $contents->{node}->associate_foreign
+            ($contents->{$id}, undef, DB_FOREIGN_ABORT) == 0
+                or Throwable::Error->throw("Error associating $id to node " .
+                                               "database: $BerkeleyDB::Error");
+    }
+
 }
 
-sub _encode_literal {
-    my $literal = shift;
-    
+sub DEMOLISH {
 }
 
-sub _decode_literal {
-    # will decode into 
-}
+=head2 get_statements $s, $p, $o [, $g, $opts]
 
-=head2 get_statements
+returns a callback in scalar context
 
 =cut
 
 sub get_statements {
+    my ($self, $s, $p, $o, $g, $opts) = @_;
 }
 
 =head2 get_contexts
 
+returns a callback in scalar context
+
 =cut
 
 sub get_contexts {
+    my $self = shift;
 }
 
-=head2 add_statement
+=head2 add_statement $s, $p, $o [, $g]
+
+returns true or throws an error
 
 =cut
 
 sub add_statement {
+    my ($self, $s, $p, $o, $g) = @_;
+    # verify input
+
+    # encode nodes
+
+    # hash nodes
+
+    # insert nodes
 }
 
-=head2 remove_statement
+=head2 remove_statement $s, $p, $o [, $g]
+
+returns true or throws an error
 
 =cut
 
@@ -237,6 +348,8 @@ sub remove_statement {
 }
 
 =head2 count_statements
+
+returns a non-negative integer
 
 =cut
 
